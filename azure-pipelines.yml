@@ -2,6 +2,7 @@ trigger:
   branches:
     include:
       - main
+
 pr:
   branches:
     include:
@@ -9,21 +10,20 @@ pr:
 
 variables:
   pythonVersion: '3.12'
-  # Optional deploy vars (set in Pipeline UI, not here):
-  # ACR_LOGIN_SERVER: youracr.azurecr.io
-  # AZURE_SERVICE_CONNECTION: sc-azure-rm
-  # WEBAPP_NAME: your-webapp
-  # DOCKER_IMAGE_NAME: fastapi-demo
-  # DOCKER_IMAGE_TAG: $(Build.BuildId)
+  DOCKER_IMAGE_NAME: 'fastapi-demo'
 
 stages:
-# ===== Stage 1: CI (build, lint, test, coverage) =====
+
+# =========================
+# Stage 1: Build + Test (CI)
+# =========================
 - stage: CI
   displayName: "Build, Lint, Test"
   jobs:
   - job: build_test
+    displayName: "Python lint & tests with coverage"
     pool:
-      vmImage: 'ubuntu-latest'
+      vmImage: ubuntu-latest
     steps:
     - checkout: self
 
@@ -34,82 +34,68 @@ stages:
     - script: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
+        pip install flake8
       displayName: "Install dependencies"
 
     - script: |
-        pip install flake8
         flake8 .
       displayName: "Lint"
 
     - script: |
-        pytest -q --disable-warnings --maxfail=1 --cov=app --cov-report=xml
-      displayName: "Run tests"
+        pytest -q --disable-warnings --maxfail=1 \
+          --cov=app --cov-report=xml \
+          --junitxml=test-results.xml
+      displayName: "Run tests with coverage"
+
+    - task: PublishTestResults@2
+      displayName: "Publish test results"
+      inputs:
+        testResultsFormat: JUnit
+        testResultsFiles: 'test-results.xml'
+        failTaskOnFailedTests: true
 
     - task: PublishCodeCoverageResults@2
-      inputs:
-        codeCoverageTool: 'Cobertura'
-        summaryFileLocation: '$(System.DefaultWorkingDirectory)/**/coverage.xml'
-      condition: succeededOrFailed()
       displayName: "Publish coverage"
+      inputs:
+        codeCoverageTool: Cobertura
+        summaryFileLocation: '$(System.DefaultWorkingDirectory)/coverage.xml'
 
-# ===== Stage 2: Build Docker image =====
+# =========================
+# Stage 2: Build Docker image (no push)
+# =========================
 - stage: Image
-  displayName: "Build Docker Image"
+  displayName: "Build Docker image and publish as artifact"
   dependsOn: CI
   condition: succeeded()
   jobs:
   - job: docker_build
     pool:
-      vmImage: 'ubuntu-latest'
+      vmImage: ubuntu-latest
     steps:
     - checkout: self
+
     - script: |
-        IMAGE=${DOCKER_IMAGE_NAME:-fastapi-demo}
-        TAG=${DOCKER_IMAGE_TAG:-$(Build.BuildId)}
-        echo "Building $IMAGE:$TAG"
-        docker build -t $IMAGE:$TAG .
+        IMAGE="$(DOCKER_IMAGE_NAME)"
+        TAG="$(Build.BuildId)"
+        echo "Building ${IMAGE}:${TAG}"
+        docker build -t "${IMAGE}:${TAG}" .
       displayName: "docker build"
 
+    - script: |
+        mkdir -p "$(Build.ArtifactStagingDirectory)"
+        docker save "$(DOCKER_IMAGE_NAME):$(Build.BuildId)" \
+          -o "$(Build.ArtifactStagingDirectory)/$(DOCKER_IMAGE_NAME)_$(Build.BuildId).tar"
+        echo "Saved image to $(Build.ArtifactStagingDirectory)/$(DOCKER_IMAGE_NAME)_$(Build.BuildId).tar"
+      displayName: "Export image to tar"
+
     - task: PublishBuildArtifacts@1
+      displayName: "Publish Docker image artifact"
+      inputs:
+        pathToPublish: '$(Build.ArtifactStagingDirectory)'
+        artifactName: 'docker-image'
+
+    - task: PublishBuildArtifacts@1
+      displayName: "Publish source snapshot"
       inputs:
         pathToPublish: '$(Build.SourcesDirectory)'
         artifactName: 'source-snapshot'
-      displayName: "Publish source snapshot"
-
-# ===== Stage 3: Push to ACR & Deploy to Web App (optional) =====
-- stage: Deploy
-  displayName: "Push to ACR & Deploy to Web App"
-  dependsOn: Image
-  condition: and(
-    succeeded(),
-    ne(variables['AZURE_SERVICE_CONNECTION'], ''),
-    ne(variables['ACR_LOGIN_SERVER'], ''),
-    ne(variables['WEBAPP_NAME'], '')
-  )
-  jobs:
-  - job: push_and_deploy
-    pool:
-      vmImage: 'ubuntu-latest'
-    steps:
-    - checkout: self
-
-    - task: Docker@2
-      displayName: "Login to ACR"
-      inputs:
-        command: 'login'
-        containerRegistry: '$(AZURE_SERVICE_CONNECTION)'
-
-    - bash: |
-        IMAGE=${DOCKER_IMAGE_NAME:-fastapi-demo}
-        TAG=${DOCKER_IMAGE_TAG:-$(Build.BuildId)}
-        FULL="$(ACR_LOGIN_SERVER)/$IMAGE:$TAG"
-        docker tag $IMAGE:$TAG $FULL
-        docker push $FULL
-      displayName: "Tag & Push image"
-
-    - task: AzureWebAppContainer@1
-      displayName: "Deploy to Azure Web App for Containers"
-      inputs:
-        azureSubscription: '$(AZURE_SERVICE_CONNECTION)'
-        appName: '$(WEBAPP_NAME)'
-        containers: '$(ACR_LOGIN_SERVER)/$(DOCKER_IMAGE_NAME:-fastapi-demo):$(DOCKER_IMAGE_TAG:-$(Build.BuildId))'
