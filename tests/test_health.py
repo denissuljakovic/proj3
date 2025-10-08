@@ -1,9 +1,11 @@
-# ---- FORCE REPO ROOT ON PYTHONPATH (works on the hosted Linux agent) ----
-import os, sys
+import os
+import sys
+
+# Put repo root on sys.path so "app" is importable on the build agent
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from fastapi.testclient import TestClient
-from app.main import app
+from fastapi.testclient import TestClient  # noqa: E402
+from app.main import app  # noqa: E402
 
 client = TestClient(app)
 
